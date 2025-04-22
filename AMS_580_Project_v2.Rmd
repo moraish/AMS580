@@ -1,0 +1,694 @@
+
+# 0.0 Setup
+
+## 0.1 Installing the required packages
+``` {r}
+install.packages("tidyverse")
+install.packages("caret")
+install.packages("rpart")
+install.packages("randomForest")
+install.packages("xgboost")
+install.packages("nnet")
+install.packages("e1071")
+install.packages("pROC")
+install.packages("doParallel")
+install.packages("ggplot2")
+install.packages("corrplot")
+
+```
+
+## 0.2 Loading the required packages
+``` {r}
+library(tidyverse)
+library(caret)    
+library(rpart)
+library(randomForest)
+library(xgboost)   
+library(nnet) 
+library(e1071)    
+library(pROC)      
+library(doParallel)
+library(corrplot)
+```
+
+# 1.0 Data Loading
+``` {r}
+
+train_file <- "train.csv"
+test_file  <- "test.csv"
+
+# Load data, treating "?" as NA and trimming whitespace
+train <- read.csv(train_file, na.strings = " ?", strip.white = TRUE)
+test  <- read.csv(test_file,  na.strings = " ?", strip.white = TRUE)
+
+cat("Dimensions of raw training data:", dim(train), "\n")
+cat("Dimensions of raw test data:", dim(test), "\n")
+```
+
+# 2.0 Analysis
+
+## 2.1 Target Variable Analyis
+
+``` {r}
+# Frequency table
+print("Frequency table for income:")
+print(table(train$income))
+
+# Proportion table
+print("Proportion table for income:")
+print(prop.table(table(train$income)))
+
+```
+
+``` {r}
+ggplot(train, aes(x = income)) +
+  geom_bar(aes(y = after_stat(prop), group = 1), fill = "steelblue", alpha = 0.8) + 
+  geom_text(aes( label = scales::percent(after_stat(prop), accuracy = 0.1),
+                 y= after_stat(prop) ), stat= "count", vjust = -0.5, size = 3.5) +
+  labs(title = "Income Distribution (Target Variable)",
+       x = "Income",
+       y = "Proportion") +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+```
+
+## 2.2 Missing Value Analysis 
+
+``` {r}
+print("Missing values per column:")
+na_counts <- colSums(is.na(train))
+print(na_counts[na_counts > 0])
+```
+
+``` {r}
+total_rows <- nrow(train)
+
+# Proportion of NAs per column
+na_proportion <- na_counts / total_rows
+
+# Print only columns with missing values (non-zero NA count)
+na_info <- data.frame(
+  Count = na_counts[na_counts > 0],
+  Percentage = round(100 * na_proportion[na_counts > 0], 2)
+)
+print(na_info)
+```
+
+***Observation***: Only a small portion ~5% of the data is missing for workclass and occupation. Therefore we should consider imputation of this data (as this would be effective) rather than dropping the rows.
+
+## 2.3 Univariate Analysis
+
+``` {r}
+# Getting the numeric columns
+numeric_cols <- names(train)[sapply(train, is.numeric)]
+
+# Getting the categorical columns
+categorical_cols <- names(train)[sapply(train, function(x) is.character(x) || is.factor(x))]
+
+# Removing income from the categorical cols
+categorical_cols <- setdiff(categorical_cols, "income")
+
+print(paste("Numeric columns:", paste(numeric_cols, collapse=", ")))
+print(paste("Categorical columns:", paste(categorical_cols, collapse=", ")))
+```
+
+### Visualizing Numeric columns
+``` {r}
+for (col in numeric_cols) {
+  p <- ggplot(train, aes_string(x = col)) +
+    geom_histogram(bins = 30, fill = "darkgreen", alpha = 0.7) +
+    labs(title = paste("Distribution of", col), x = col, y = "Frequency") +
+    theme_minimal()
+  print(p)
+}
+```
+
+### Visualizing Categorical columns
+
+``` {r}
+for (col in categorical_cols) {
+  # Handling potentially large number of categories (e.g., native-country)
+  # Option 1: Show all (might be messy for native-country)
+   p <- ggplot(train, aes_string(x = col)) +
+     geom_bar(fill = "purple", alpha = 0.7) +
+     labs(title = paste("Distribution of", col), x = col, y = "Count") +
+     theme_minimal() +
+     theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8)) # Rotate labels
+   print(p)
+}
+
+```
+
+## 2.4 Multivariate Analysis
+``` {r}
+print("Calculating and plotting correlation matrix for numerical features...")
+
+# Select only numeric columns from train dataset
+numeric_train_data <- train %>% select_if(is.numeric)
+
+cor_matrix <- cor(numeric_train_data, use = "pairwise.complete.obs")
+
+print("Correlation Matrix:")
+print(round(cor_matrix, 2))
+```
+
+``` {r}
+
+png("correlation_matrix.png", width = 1200, height = 1000, res = 100)
+
+# Visualize the correlation matrix with larger numbers
+corrplot(cor_matrix,
+         method = "color",  # Use colors for better visibility
+         type = "upper",
+         tl.col = "black",
+         tl.srt = 45,
+         addCoef.col = "black",  # Add correlation coefficients
+         number.cex = 0.8,       # Control size of numbers
+         title = "Correlation Matrix of Numerical Features",
+         mar = c(0, 0, 2, 0))    # Adjust margins
+
+dev.off()
+
+# For direct viewing in RStudio, you can also do:
+corrplot(cor_matrix,
+         method = "color",
+         type = "upper",
+         tl.col = "black",
+         tl.srt = 45,
+         addCoef.col = "black",
+         number.cex = 0.8,
+         title = "Correlation Matrix of Numerical Features")
+```
+
+## 2.5 Adhoc Analysis
+
+Education and Education_number seem to be the same columns.
+``` {r}
+education_mapping <- train %>%
+  select(education, education.num) %>%
+  distinct() %>%
+  arrange(education.num)
+
+# Print the mapping
+print(education_mapping)
+```
+
+***Observation***: Looks like education number is just the numeric representation of the education column, therefore we can drop one of them, (mostly the categorical column). The numeric column is also ordinal.
+
+# 3.0 Data Processing
+
+## 3.1 Handle Missing Values
+Dropping rows with missing values for now. Should try imputation as well.
+
+``` {r}
+train <- na.omit(train)
+test  <- na.omit(test)
+
+cat("Dimensions after removing NAs (Train):", dim(train), "\n")
+cat("Dimensions after removing NAs (Test):", dim(test), "\n")
+```
+
+## 3.2 Trimming whitespace in character columns
+
+- Creating the function 
+- Applying the function to both train and test
+``` {r}
+trimws_df <- function(df) {
+  df %>% mutate(across(where(is.character), trimws))
+}
+
+train <- trimws_df(train)
+test  <- trimws_df(test)
+cat("Whitespace trimmed from character columns.\n")
+```
+
+## 3.3 Dropping columns that are not required 
+i. fnlwgt - weight factor used by create population estimates, 
+ii. education - as we have education_num which is just the numeric representation.
+``` {r}
+train$fnlwgt <- NULL
+test$fnlwgt  <- NULL
+train$education <- NULL
+test$education  <- NULL 
+cat("Columns 'fnlwgt' and 'education' dropped.\n")
+```
+
+## 3.4 Feature Engineering 
+i. Marital Status grouping - Make 3 categories - Married and Never Married, Not Married (Separated, Divorced, and Widowed )
+
+``` {r}
+status <- function(mar) {
+  mar <- as.character(mar)
+  if(mar == 'Separated' | mar == 'Divorced' | mar == 'Widowed'){
+    return('Not-Married') # Groups separated, divorced, widowed
+  } else if(mar == 'Never-married'){
+    return(mar) # Keeps Never-married as is
+  } else {
+    return('Married') # Groups Married-civ-spouse, Married-spouse-absent, Married-AF-spouse
+  }
+}
+train$marital.status <- sapply(train$marital.status, status)
+test$marital.status  <- sapply(test$marital.status, status)
+cat("Marital status grouped into: Married, Not-Married, Never-married.\n")
+print(table(train$marital.status))
+```
+
+ii. Native Countrying Grouping - US and Other
+
+``` {r}
+group_country <- function(ctry){
+  ctry <- as.character(ctry)
+  if (ctry == "United-States") {
+    return('United-States')
+  } else {
+    return('Other')
+  }
+}
+# Apply grouping and replace original column
+train$native.country <- sapply(train$native.country, group_country)
+test$native.country  <- sapply(test$native.country, group_country)
+cat("Native country grouped into: United-States, Other.\n")
+print(table(train$native.country))
+
+```
+
+
+## 3.5 Convert Character/Logical Columns to Factors
+
+i. Identify all columns that can be converted to factors
+``` {r}
+factor_cols <- names(train)[sapply(train, function(x) is.character(x) || is.logical(x))]
+# Ensure 'income' is treated last or separately if needed
+factor_cols <- setdiff(factor_cols, "income")
+
+cat("Columns to be converted to factors:", paste(factor_cols, collapse=", "), "\n")
+```
+
+ii. Perform conversion is train
+iii. Ensure same columns from test are converted
+``` {r}
+train[factor_cols] <- lapply(train[factor_cols], factor)
+
+for(col in factor_cols) {
+  if (col %in% names(test)) {
+     test[[col]] <- factor(test[[col]], levels = levels(train[[col]]))
+  } else {
+     warning(paste("Column", col, "not found in test set during factor conversion."))
+  }
+}
+cat("Character columns converted to factors with matching levels.\n")
+```
+
+## 3.6 Create Ordered Factor
+Education Num should be convered to an ordered factor as education level might be a good indicator for income
+
+``` {r}
+if ("education.num" %in% names(train)) {
+  train$education.num <- ordered(train$education.num)
+  test$education.num  <- ordered(test$education.num, levels = levels(train$education.num))
+  cat("'education.num' converted to an ordered factor.\n")
+}
+```
+
+## 3.7 Data Structure Overview
+``` {r}
+cat("\nFinal structure of preprocessed training data:\n")
+str(train, list.len = ncol(train))
+cat("\nFinal structure of preprocessed test data:\n")
+str(test, list.len = ncol(test))
+```
+
+
+# 4.0 Model Training and Setup
+
+## 4.1 Setting up Cross Validation
+i. 5 fold CV, enabling probabilities, saving predictions, and using up-sampling
+``` {r}
+ctrl <- trainControl(
+  method = "cv",
+  number = 5, # 5-fold CV
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE,                 
+  savePredictions = "final",         
+  sampling = "up",                   
+  allowParallel = TRUE # allow parallel processing              
+)
+cat("Caret trainControl defined with 5-fold CV, ROC metric, and up-sampling.\n")
+```
+
+## 4.2 Prepare target variable
+
+``` {r}
+
+valid_levels <- c("lte50k", "gt50k")
+train$income <- factor(train$income, levels = c("<=50K", ">50K"), labels = valid_levels)
+test$income  <- factor(test$income,  levels = c("<=50K", ">50K"), labels = valid_levels)
+
+cat("New levels for train$income:", levels(train$income), "\n")
+cat("New levels for test$income:", levels(test$income), "\n")
+cat("Table for train$income:\n")
+print(table(train$income))
+
+neg <- valid_levels[1] # "lte50k"
+pos <- valid_levels[2] # "gt50k"
+cat("Target variable levels redefined to:", neg, pos, "\n")
+```
+
+
+``` {r}
+set.seed(123)
+
+model_fits <- list()
+model_cms <- list()
+model_stats <- list()
+
+```
+
+## 4.3 MODEL - 1: Logistic Regression
+
+
+``` {r}
+glmnet_grid <- expand.grid(
+  alpha = seq(0, 1, by = 0.1),      # From ridge (0) to lasso (1)
+  lambda = 10^seq(-4, 1, length = 50) # Penalty values
+)
+
+# Train model
+model_fits$glmnet <- train(
+  income ~ .,
+  data = train,
+  method = "glmnet",
+  trControl = ctrl,
+  tuneGrid = glmnet_grid,
+  metric = "ROC",
+  family = "binomial" # Specify binomial for logistic regression
+)
+print(model_fits$glmnet$bestTune)
+```
+
+
+## 4.4 MODEL - 2: Cart Decision Tree
+``` {r}
+
+cart_grid <- expand.grid(cp = seq(0.001, 0.1, by = 0.001))
+
+# Train model
+model_fits$cart <- train(
+  income ~ .,
+  data = train,
+  method = "rpart",
+  trControl = ctrl,
+  tuneGrid = cart_grid,
+  metric = "ROC"
+)
+print(model_fits$cart$bestTune)
+```
+
+## 4.5 MODEL - 3: Random Forest
+
+``` {r}
+
+num_predictors <- ncol(train) - 1 # Subtract 1 for the income variable
+rf_grid <- expand.grid(mtry = seq(from = 2,
+                                  to = floor(sqrt(num_predictors)) + 3, # Explore slightly wider range
+                                  by = 1))
+cat("Number of predictors:", num_predictors, "\n")
+cat("Random Forest mtry grid:\n")
+print(rf_grid)
+```
+
+``` {r}
+model_fits$rf <- train(
+  income ~ .,
+  data = train,
+  method = "rf",
+  trControl = ctrl,
+  tuneGrid = rf_grid,
+  metric = "ROC",
+  ntree = 500  
+)
+print(model_fits$rf$bestTune)
+```
+
+
+## 4.5 MODEL - 4: XGBoost 
+
+``` {r}
+xgb_grid <- expand.grid(
+  nrounds = c(100, 200),          
+  max_depth = c(6, 9),           
+  eta = c(0.1, 0.3),              
+  gamma = c(0, 1),                
+  colsample_bytree = c(0.6, 0.8), 
+  min_child_weight = c(1, 5),     
+  subsample = c(0.6, 0.8, 1.0)   
+)
+cat("XGBoost tuning grid defined (reduced size for faster example, original was larger):\n")
+# Reducing grid size slightly for faster execution in this example
+xgb_grid_small <- expand.grid(
+  nrounds = c(100, 200), max_depth = c(6), eta = c(0.1), gamma = c(0),
+  colsample_bytree = c(0.6, 0.8), min_child_weight = c(1), subsample = c(0.8, 1.0)
+)
+print(xgb_grid_small)
+
+``` 
+
+``` {r}
+# Set up parallel processing
+num_cores <- detectCores() - 1
+if (num_cores < 1) num_cores <- 1 # Ensure at least 1 core
+cl <- makePSOCKcluster(num_cores)
+registerDoParallel(cl)
+cat("Registered", num_cores, "cores for parallel processing.\n")
+
+```
+
+``` {r}
+# Train XGBoost model
+# Use suppressWarnings to hide potential verbose output from xgboost itself
+suppressWarnings({
+  model_fits$xgb <- train(
+    income ~ .,
+    data = train,
+    method = "xgbTree",
+    trControl = ctrl,
+    tuneGrid = xgb_grid_small, # Use the smaller grid for example speed
+    metric = "ROC",
+    verbosity = 0 # Suppress XGBoost's internal messages
+  )
+})
+
+# Stop parallel backend
+stopCluster(cl)
+registerDoSEQ() # Register sequential backend
+cat("Parallel processing stopped.\n")
+print(model_fits$xgb$bestTune)
+```
+
+## 4.6 Model 5 - Neural Network
+
+``` {r}
+nnet_grid <- expand.grid(
+  size = c(1, 3, 5, 7),      # Number of hidden units
+  decay = c(0, 0.01, 0.1)  # Weight decay (regularization)
+)
+
+model_fits$nnet <- train(
+  income ~ .,
+  data = train,
+  method = "nnet",
+  trControl = ctrl,
+  tuneGrid = nnet_grid,
+  metric = "ROC",
+  preProcess = c("center", "scale"), # Standardize predictors within caret for nnet
+  trace = FALSE,                    # Suppress verbose output from nnet
+  maxit = 200                       # Maximum iterations (as in ams580-project)
+)
+print(model_fits$nnet$bestTune)
+
+```
+
+
+# 5.0 Model Evaluation
+
+``` {r}
+model_names <- names(model_fits)
+
+for (m_name in model_names) {
+  cat("\n--- Evaluating Model:", m_name, "---\n")
+  fit <- model_fits[[m_name]]
+
+  # Predict probabilities for the positive class
+  test_probs <- predict(fit, newdata = test, type = "prob")[, pos]
+
+  # Predict classes based on 0.5 threshold
+  test_preds <- factor(ifelse(test_probs > 0.5, pos, neg), levels = c(neg, pos))
+
+  # Create confusion matrix
+  cm <- confusionMatrix(test_preds, test$income, positive = pos)
+  model_cms[[m_name]] <- cm
+
+  # Store key stats
+  acc <- cm$overall["Accuracy"]
+  sens <- cm$byClass["Sensitivity"]
+  spec <- cm$byClass["Specificity"]
+  roc_auc <- NA # Placeholder, will calculate properly later if needed for table
+   tryCatch({
+        roc_obj <- roc(response = test$income, predictor = test_probs, levels = c(neg, pos), quiet=TRUE)
+        roc_auc <- auc(roc_obj)
+   }, error = function(e) { cat("Could not calculate ROC AUC for", m_name, "\n")})
+
+
+  model_stats[[m_name]] <- data.frame(
+    Model = m_name,
+    Accuracy = acc,
+    Sensitivity = sens,
+    Specificity = spec,
+    AUC = roc_auc
+   )
+
+  # Print results
+  cat("Confusion Matrix:\n")
+  print(cm$table)
+  cat("\nOverall Statistics:\n")
+  print(cm$overall)
+  cat("\nClass Statistics (Sensitivity, Specificity, etc.):\n")
+  print(cm$byClass)
+  cat("\nTest Set AUC:", roc_auc, "\n")
+}
+
+# Combine summary statistics
+all_stats <- bind_rows(model_stats)
+cat("\n--- Summary of Model Performance on Test Set ---\n")
+print(all_stats, row.names = FALSE)
+```
+
+``` {r}
+model_names <- names(model_fits)
+# Re-initialize list to ensure it's empty before the loop
+model_stats <- list()
+model_cms <- list() # Assuming you still want to store confusion matrices
+
+for (m_name in model_names) {
+  cat("\n--- Evaluating Model:", m_name, "---\n")
+  fit <- model_fits[[m_name]]
+
+  # Default values in case of errors
+  acc <- NA_real_
+  sens <- NA_real_
+  spec <- NA_real_
+  roc_auc <- NA_real_
+  cm <- NULL # Initialize cm to NULL
+
+  tryCatch({
+    # Predict probabilities for the positive class
+    # Ensure 'pos' variable (e.g., "gt50k") is correctly defined from Section 4.5
+    test_probs <- predict(fit, newdata = test, type = "prob")
+
+    # Check if expected column 'pos' exists in probabilities
+    if (!pos %in% colnames(test_probs)) {
+        stop(paste("Positive class level '", pos, "' not found in predicted probabilities for model", m_name))
+    }
+    test_probs_pos <- test_probs[, pos]
+
+    # Predict classes based on 0.5 threshold
+    # Ensure 'neg' and 'pos' variables are correctly defined
+    test_preds <- factor(ifelse(test_probs_pos > 0.5, pos, neg), levels = c(neg, pos))
+
+    # --- Create confusion matrix ---
+    cm <- confusionMatrix(test_preds, test$income, positive = pos)
+    model_cms[[m_name]] <- cm # Store the cm object if successful
+
+    # --- Extract key stats (with checks) ---
+    if (!is.null(cm)) {
+        acc  <- as.numeric(cm$overall["Accuracy"])
+        sens <- as.numeric(cm$byClass["Sensitivity"])
+        spec <- as.numeric(cm$byClass["Specificity"])
+
+        # Calculate AUC (inside this tryCatch or keep the separate one)
+        roc_obj <- roc(response = test$income, predictor = test_probs_pos, levels = c(neg, pos), quiet = TRUE)
+        roc_auc <- as.numeric(auc(roc_obj))
+
+    } else {
+      cat("Warning: Confusion Matrix calculation failed for model", m_name, "\n")
+    }
+
+    # Print results if cm is valid
+    if (!is.null(cm)){
+        cat("Confusion Matrix:\n")
+        print(cm$table)
+        cat("\nOverall Statistics:\n")
+        print(cm$overall)
+        cat("\nClass Statistics (Sensitivity, Specificity, etc.):\n")
+        print(cm$byClass)
+        cat("\nTest Set AUC:", roc_auc, "\n")
+    }
+
+  }, error = function(e) {
+    cat("Error during evaluation of model:", m_name, "\n")
+    cat("Error message:", e$message, "\n")
+    # Keep default NA values for metrics
+  }) # End of tryCatch block
+
+  # --- Store stats (even if NAs occurred) ---
+  model_stats[[m_name]] <- data.frame(
+    Model = m_name,
+    Accuracy = acc,
+    Sensitivity = sens,
+    Specificity = spec,
+    AUC = roc_auc
+   )
+
+} # End of loop
+
+# --- Combine summary statistics (using dplyr::bind_rows) ---
+# Check if model_stats list is empty before binding
+if (length(model_stats) > 0) {
+    all_stats <- dplyr::bind_rows(model_stats)
+    cat("\n--- Summary of Model Performance on Test Set ---\n")
+    # Use print() for data frames, ensure row names aren't printed if undesired
+    print.data.frame(all_stats, row.names = FALSE)
+} else {
+    cat("\nWarning: No model statistics were successfully generated to create a summary.\n")
+    all_stats <- NULL # Or an empty data frame: data.frame()
+}
+
+```
+
+# 6.0 ROC Curve
+``` {r}
+roc_data_all <- data.frame()
+
+# Generate ROC data for each model
+for (m_name in model_names) {
+  fit <- model_fits[[m_name]]
+  # Predict probabilities on the test set
+  test_probs <- predict(fit, newdata = test, type = "prob")[, pos]
+
+  # Create ROC object
+  roc_obj <- roc(response = test$income, predictor = test_probs, levels = c(neg, pos), quiet = TRUE)
+
+  # Add data to the combined data frame
+  roc_data_all <- rbind(roc_data_all,
+                       data.frame(
+                         Model = paste0(m_name, " AUC = ", round(auc(roc_obj), 4)), # Include AUC in label
+                         FPR = 1 - roc_obj$specificities, # False Positive Rate
+                         TPR = roc_obj$sensitivities    # True Positive Rate (Sensitivity)
+                       ))
+}
+```
+
+``` {r}
+# Plot all ROC curves
+roc_plot <- ggplot(roc_data_all, aes(x = FPR, y = TPR, color = Model)) +
+  geom_line(linewidth = 1) + # Use linewidth instead of size
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
+  scale_color_brewer(palette = "Set1") + # Use a nice color palette
+  labs(title = "ROC Curves for Different Models on Test Set",
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  theme_minimal() +
+  theme(legend.position = "bottom") # Adjust legend position if needed
+
+print(roc_plot)
+```
